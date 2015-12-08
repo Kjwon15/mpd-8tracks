@@ -26,6 +26,7 @@ import urllib2
 import os
 import json
 import time
+import socket
 
 def normalize(s):
    t = s.encode('ascii', 'ignore')
@@ -36,6 +37,47 @@ def fix_track_url(url):
       return 'http' + url[5:]
    return url
 
+
+class Mpd():
+
+   def __init__(self, host=None, port=None, password=None):
+      self.host = host or 'localhost'
+      self.port = port or 6600
+      self.password = password
+
+      self._connect()
+
+   def command(self, commands):
+      if not isinstance(commands, str):
+         commands = ('command_list_begin\n' +
+                     ('\n'.join(commands) + '\n') +
+                     'command_list_end\n')
+
+      self._command(commands)
+
+   def _connect(self):
+      if hasattr(self, 'sock'):
+         self.sock.close()
+
+      self.sock = socket.socket()
+      self.sock.connect((self.host, self.port))
+
+      if self.password:
+         self.sock.send('password {}\n'.format(self.password))
+
+      self.sock.recv(1024)
+
+   def _command(self, command):
+      while 1:
+         try:
+            self.sock.send(command)
+            self.sock.recv(1024)
+         except socket.error:
+            self._connect()
+         else:
+            break
+
+
 # Open config file
 config = None
 try:
@@ -43,11 +85,6 @@ try:
         config = json.load(config_text)
 except IOError:
     print >> sys.stderr, "WARN: No config.json file"
-
-# Check that MPD/MPC is working
-if (os.system('mpc 1>/dev/null 2>/dev/null') != 0):
-   print >> sys.stderr, "ERR: MPD isn't running; please start mpd and run again"
-   sys.exit(1)
 
 # Check and process input options, url(s)
 mix_urls = []
@@ -72,6 +109,12 @@ else:
    print "Using API Key from config.json..."
    api_key = config['apikey']
 
+# MPD config
+mpd_host = config.get('mpd_host', None)
+mpd_port = config.get('mpd_port', None)
+mpd_password = config.get('mpd_password', None)
+mpd_client = Mpd(mpd_host, mpd_port, mpd_password)
+
 # we're using api version 3
 api_version = "3"
 
@@ -82,8 +125,7 @@ def api_call(path, **kwargs):
    return json.loads(urllib2.urlopen(query).read())
 
 # Set up mpd
-os.system("mpc clear 1>/dev/null")
-os.system("mpc consume on 1>/dev/null")
+mpd_client.command(['clear', 'consume 1'])
 
 # Get the play token
 play_token_info = api_call("sets/new")
@@ -113,7 +155,7 @@ for mix_url in mix_urls:
       if (song_info['status'] == "403 Forbidden"):
         time.sleep(30)
         continue
-      
+
       # Get relevant information and save it
       track_id = song_info['set']['track']['id']
       artist = normalize(song_info['set']['track']['performer'])
@@ -138,8 +180,10 @@ for mix_url in mix_urls:
       api_call("sets/%s/report" % play_token, mix_id=mix_id, track_id=track_id)
 
       # Queue the song via mpc
-      os.system("mpc add \"%s\" 1>/dev/null" % track_url)
-      os.system("mpc play 1>/dev/null")
+      mpd_client.command([
+         'add "{}"'.format(track_url),
+         'play',
+      ])
 
       # If we're at the end of the mix finish up
       if song_info['set']['at_end']:
